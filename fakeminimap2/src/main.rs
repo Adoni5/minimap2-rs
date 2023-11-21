@@ -129,7 +129,7 @@ fn main() {
         let work_queue = Arc::clone(&work_queue);
         let results_queue = Arc::clone(&results_queue);
         debug!("Get clones");
-        let aligner = aligner.clone();
+        let mut aligner = aligner.clone();
         debug!("Cloned aligner");
         std::thread::spawn(move || loop {
             let backoff = crossbeam::utils::Backoff::new();
