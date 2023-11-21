@@ -807,7 +807,7 @@ impl Aligner {
                 ))]
                 {
                     mm_map(
-                        self.idx.as_ref().unwrap() as *const mm_idx_t,
+                        self.idx.as_ref().unwrap().as_ptr(),
                         seq.len() as i32,
                         seq.as_ptr() as *const u8,
                         &mut n_regs,
@@ -823,7 +823,7 @@ impl Aligner {
                 ))]
                 {
                     mm_map(
-                        self.idx.as_ref().unwrap().ptr.as_ptr() as *const mm_idx_t,
+                        self.idx.as_ref().unwrap().as_ptr(),
                         seq.len() as i32,
                         seq.as_ptr() as *const i8,
                         &mut n_regs,
