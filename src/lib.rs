@@ -943,7 +943,7 @@ impl Aligner {
                                         km,
                                         &mut cs_string,
                                         &mut m_cs_string,
-                                        &self.idx.unwrap() as *const mm_idx_t,
+                                        self.idx.as_ref().unwrap().as_ptr(),
                                         const_ptr,
                                         seq.as_ptr() as *const u8,
                                         true.into(),
@@ -990,7 +990,7 @@ impl Aligner {
                                         km,
                                         &mut cs_string,
                                         &mut m_cs_string,
-                                        &self.idx.unwrap() as *const mm_idx_t,
+                                        self.idx.as_ref().unwrap().as_ptr(),
                                         const_ptr,
                                         seq.as_ptr() as *const u8,
                                     );
