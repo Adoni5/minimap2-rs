@@ -55,6 +55,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use libc::c_void;
 use minimap2_sys::*;
+use std::marker::Send;
+use std::ptr::NonNull;
 
 #[cfg(feature = "map-file")]
 use flate2::read::GzDecoder;
@@ -272,13 +274,30 @@ impl Default for ThreadLocalBuffer {
 //     self.uses += 1
 //     return self._b
 
+/// Safe Index pointer
+#[derive(Clone)]
+pub struct MySafePointer<T> {
+    pub ptr: NonNull<T>,
+}
+unsafe impl<T> Send for MySafePointer<T> where T: Send {}
+impl<T> MySafePointer<T> {
+    // Method to get an immutable raw pointer
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr.as_ptr()
+    }
+
+    // Method to get a mutable raw pointer
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+}
+
 /// Aligner struct, mimicking minimap2's python interface
 ///
 /// ```
 /// # use minimap2::*;
 /// Aligner::builder();
 /// ```
-
 #[derive(Clone)]
 pub struct Aligner {
     /// Index options passed to minimap2 (mm_idxopt_t)
@@ -291,7 +310,7 @@ pub struct Aligner {
     pub threads: usize,
 
     /// Index created by minimap2
-    pub idx: Option<mm_idx_t>,
+    pub idx: Option<MySafePointer<mm_idx_t>>,
 
     /// Index reader created by minimap2
     pub idx_reader: Option<mm_idx_reader_t>,
@@ -586,8 +605,11 @@ impl Aligner {
             // Idx index name
             mm_idx_index_name(idx.assume_init());
         }
-
-        self.idx = Some(unsafe { *idx.assume_init() });
+        let idx_raw = unsafe { idx.assume_init() };
+        // Safety check before wrapping the raw pointer
+        let idx_safe = NonNull::new(idx_raw).ok_or("Ahhhh")?;
+        let my_safe_pointer = MySafePointer { ptr: idx_safe };
+        self.idx = Some(my_safe_pointer);
 
         Ok(())
     }
@@ -716,8 +738,11 @@ impl Aligner {
                 )
             }
         });
-
-        self.idx = Some(unsafe { *idx.assume_init() });
+        let idx_raw = unsafe { idx.assume_init() };
+        // Safety check before wrapping the raw pointer
+        let idx_safe = NonNull::new(idx_raw).ok_or("Ahhhh")?;
+        let my_safe_pointer = MySafePointer { ptr: idx_safe };
+        self.idx = Some(my_safe_pointer);
         self.mapopt.mid_occ = 1000;
 
         Ok(self)
@@ -736,7 +761,7 @@ impl Aligner {
     /// extra_flags: Extra flags to pass to minimap2 as Vec<u64>
     ///
     pub fn map(
-        &self,
+        &mut self,
         seq: &[u8],
         cs: bool,
         md: bool, // TODO
@@ -798,7 +823,7 @@ impl Aligner {
                 ))]
                 {
                     mm_map(
-                        self.idx.as_ref().unwrap() as *const mm_idx_t,
+                        self.idx.as_ref().unwrap().ptr.as_ptr() as *const mm_idx_t,
                         seq.len() as i32,
                         seq.as_ptr() as *const i8,
                         &mut n_regs,
@@ -817,7 +842,10 @@ impl Aligner {
                     let reg: mm_reg1_t = *reg_ptr;
 
                     let contig: *mut ::std::os::raw::c_char =
-                        (*(self.idx.unwrap()).seq.offset(reg.rid as isize)).name;
+                        (*(*(self.idx.as_mut().unwrap().as_mut_ptr()))
+                            .seq
+                            .offset(reg.rid as isize))
+                        .name;
 
                     let is_primary = reg.parent == reg.id;
                     let alignment = if !reg.p.is_null() {
@@ -936,7 +964,7 @@ impl Aligner {
                                         km,
                                         &mut cs_string,
                                         &mut m_cs_string,
-                                        &self.idx.unwrap() as *const mm_idx_t,
+                                        self.idx.as_ref().unwrap().as_ptr(),
                                         const_ptr,
                                         seq.as_ptr() as *const i8,
                                         true.into(),
@@ -982,7 +1010,7 @@ impl Aligner {
                                         km,
                                         &mut cs_string,
                                         &mut m_cs_string,
-                                        &self.idx.unwrap() as *const mm_idx_t,
+                                        self.idx.as_ref().unwrap().as_ptr(),
                                         const_ptr,
                                         seq.as_ptr() as *const i8,
                                     );
@@ -1018,7 +1046,10 @@ impl Aligner {
                                 .unwrap()
                                 .to_string(),
                         ),
-                        target_len: (*(self.idx.unwrap()).seq.offset(reg.rid as isize)).len as i32,
+                        target_len: (*(*(self.idx.as_ref().unwrap().as_ptr()))
+                            .seq
+                            .offset(reg.rid as isize))
+                        .len as i32,
                         target_start: reg.rs,
                         target_end: reg.re,
                         query_name: None,
@@ -1058,7 +1089,12 @@ impl Aligner {
     /// TODO: Remove cs and md and make them options on the struct
     ///
     #[cfg(feature = "map-file")]
-    pub fn map_file(&self, file: &str, cs: bool, md: bool) -> Result<Vec<Mapping>, &'static str> {
+    pub fn map_file(
+        &mut self,
+        file: &str,
+        cs: bool,
+        md: bool,
+    ) -> Result<Vec<Mapping>, &'static str> {
         // Make sure index is set
         if self.idx.is_none() {
             return Err("No index");
@@ -1402,7 +1438,7 @@ mod tests {
 
     #[test]
     fn test_mappy_output() {
-        let aligner = Aligner::builder()
+        let mut aligner = Aligner::builder()
             .preset(Preset::MapOnt)
             .with_threads(1)
             .with_index("test_data/MT-human.fa", None)
@@ -1458,7 +1494,7 @@ mod tests {
 
     #[test]
     fn test_mappy_output_no_md() {
-        let aligner = Aligner::builder()
+        let mut aligner = Aligner::builder()
             .preset(Preset::MapOnt)
             .with_threads(1)
             .with_index("test_data/MT-human.fa", None)
@@ -1498,8 +1534,8 @@ mod tests {
     fn test_with_seq() {
         let seq = "CGGCACCAGGTTAAAATCTGAGTGCTGCAATAGGCGATTACAGTACAGCACCCAGCCTCCGAAATTCTTTAACGGTCGTCGTCTCGATACTGCCACTATGCCTTTATATTATTGTCTTCAGGTGATGCTGCAGATCGTGCAGACGGGTGGCTTTAGTGTTGTGGGATGCATAGCTATTGACGGATCTTTGTCAATTGACAGAAATACGGGTCTCTGGTTTGACATGAAGGTCCAACTGTAATAACTGATTTTATCTGTGGGTGATGCGTTTCTCGGACAACCACGACCGCGACCAGACTTAAGTCTGGGCGCGGTCGTGGTTGTCCGAGAAACGCATCACCCACAGATAAAATCAGTTATTACAGTTGGACCTTTATGTCAAACCAGAGACCCGTATTTC";
         let query = "GGTCGTCGTCTCGATACTGCCACTATGCCTTTATATTATTGTCTTCAGGTGATGCTGCAGATCGTGCAGACGGGTGGCTTTAGTGTTGTGGGATGCATAGCTATTGACGGATCTTTGTCAATTGACAGAAATACGGGTCTCTGGTTTGACATGAAGGTCCAACTGTAATAACTGATTTTATCTGTGGGTGATGCGTTTCTCGGACAACCACGACCGCGACCAGACTTAAGTCTGGGCGCGGTCGTGGTT";
-        let aligner = Aligner::builder().short();
-        let aligner = aligner.with_seq(seq.as_bytes()).unwrap();
+        let mut aligner = Aligner::builder().short();
+        let mut aligner = aligner.with_seq(seq.as_bytes()).unwrap();
         let alignments = aligner
             .map(query.as_bytes(), false, false, None, None)
             .unwrap();
@@ -1508,7 +1544,7 @@ mod tests {
         println!("----- Trying with_seqs 1");
 
         let aligner = Aligner::builder().short();
-        let aligner = aligner.with_seqs(&vec![seq.as_bytes().to_vec()]).unwrap();
+        let mut aligner = aligner.with_seqs(&vec![seq.as_bytes().to_vec()]).unwrap();
         let alignments = aligner
             .map(query.as_bytes(), false, false, None, None)
             .unwrap();
@@ -1518,7 +1554,7 @@ mod tests {
 
         let id = "test";
         let aligner = Aligner::builder().short();
-        let aligner = aligner
+        let mut aligner = aligner
             .with_seqs_and_ids(
                 &vec![seq.as_bytes().to_vec()],
                 &vec![id.as_bytes().to_vec()],
@@ -1533,7 +1569,7 @@ mod tests {
 
         let id = "test";
         let aligner = Aligner::builder().short();
-        let aligner = aligner
+        let mut aligner = aligner
             .with_seq_and_id(seq.as_bytes(), &id.as_bytes().to_vec())
             .unwrap();
         let alignments = aligner
@@ -1549,7 +1585,7 @@ mod tests {
             .with_cigar()
             .with_sam_out()
             .with_sam_hit_only();
-        let aligner = aligner
+        let mut aligner = aligner
             .with_seq_and_id(seq.as_bytes(), &id.as_bytes().to_vec())
             .unwrap();
         let alignments = aligner
@@ -1609,12 +1645,12 @@ mod tests {
         let _aligner = Aligner::builder().splice();
         let _aligner = Aligner::builder().cdna();
 
-        let aligner = Aligner::builder();
+        let mut aligner = Aligner::builder();
         assert_eq!(
             aligner.map_file("test_data/MT-human.fa", false, false),
             Err("No index")
         );
-        let aligner = aligner.with_index("test_data/MT-human.fa", None).unwrap();
+        let mut aligner = aligner.with_index("test_data/MT-human.fa", None).unwrap();
         assert_eq!(
             aligner.map_file("test_data/file-does-not-exist", false, false),
             Err("File does not exist")
